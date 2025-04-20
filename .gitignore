@@ -1,0 +1,15 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# VS Code
+.vscode/
+
+# 環境變數
+.env
+
+# 其它可忽略檔
+.DS_Store
+Thumbs.db
+secret/
