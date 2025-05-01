@@ -28,10 +28,12 @@ def index():
 from words.routes import bp as words_bp
 from articles.routes import bp as articles_bp
 from auth.routes import bp as auth_bp
+from review.routes import bp as review_bp
 
 app.register_blueprint(auth_bp)
 app.register_blueprint(words_bp)
 app.register_blueprint(articles_bp)
+app.register_blueprint(review_bp)
 
 if __name__ == "__main__":
     app.run(debug=True)

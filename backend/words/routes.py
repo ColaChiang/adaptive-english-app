@@ -15,11 +15,17 @@ def create_word():
     level = data.get('level', 'A1')
     if not word:
         return jsonify(error="word is required"), 400
-
+    # SM-2 初始參數
+    init_interval = 0
+    init_ef       = 2.5
+    init_due      = datetime.utcnow()  # 立即到期
     db.collection("words").document(word).set({
         "userId": user_id,
         "level": level,
-        "createdAt": datetime.utcnow()
+        "createdAt": datetime.utcnow(),
+        "lastInterval": init_interval,
+        "easeFactor":   init_ef,
+        "dueDate":      init_due
     })
     return jsonify(message=f"{word} saved", level=level), 201
 
