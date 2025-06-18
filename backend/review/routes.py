@@ -51,7 +51,9 @@ def review_feedback():
     doc_ref.update({
         "lastInterval": new_interval,
         "easeFactor":   new_ef,
-        "dueDate":      next_due
+        "dueDate":      next_due,
+        "reviewCount": firestore.Increment(1)
+
     })
 
     return jsonify(
