@@ -6,6 +6,7 @@ from firebase_admin import firestore
 import openai
 from lexile import approximate_lexile as lexile_score
 from auth.utils import auth_required
+from sm2 import due_date_from_interval
 
 # 建立 Blueprint 並設定路徑前綴
 bp = Blueprint('articles', __name__, url_prefix='/articles')
@@ -17,64 +18,74 @@ openai.api_key = os.getenv("OPENAI_API_KEY")
 def create_article():
     """
     建立新文章：
-      1. 呼叫 GPT-4o 產文並計算 Lexile 分數
-      2. 存入 Firestore（儲存 userId、目標與實際分數、關鍵字、內容、時間）
-      3. 回傳新增文檔的 ID、文章內容、目標與實際 Lexile
-    """
-    user_id     = g.user['sub']
-    data        = request.get_json(force=True)
-    lexileTarget = data.get("lexileTarget", 800)
-    targetWords  = data.get("targetWords", [])
-
-    prompt = (
-        f"Please write a short English passage with a Lexile score around {lexileTarget}. "
-        f"Include at least these words: {', '.join(targetWords)}."
-    )
-    resp = openai.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role":"user","content":prompt}],
-        max_tokens=300,
-    )
-    article_text = resp.choices[0].message.content.strip()
-
-    # 計算實際Lexile分數
-    lexileActual = lexile_score(article_text)
-
-    # 存入Firestore
-    doc_ref = db.collection("articles").document()
-    doc_ref.set({
-        "userId":       user_id,
-        "lexileTarget": lexileTarget,
-        "lexileActual": lexileActual,
-        "targetWords":  targetWords,
-        "article":      article_text,
-        "createdAt":    datetime.utcnow()
-    })
-
-    return jsonify(
-        id=doc_ref.id,
-        article=article_text,
-        lexileTarget=lexileTarget,
-        lexileActual=lexileActual
-    ), 201
-
-@bp.route('', methods=['GET'])
-@auth_required
-def list_articles():
-    """
-    列出所有使用者自己的文章，包含目標與實際難度
+    - 使用 GPT 產文，包含指定單字
+    - 計算 Lexile 難度
+    - 儲存於 Firestore，附帶分析資訊
     """
     user_id = g.user['sub']
-    docs = (db.collection("articles")
-              .where("userId", "==", user_id)
-              .order_by("createdAt")
-              .stream())
-    articles = [
-        {**doc.to_dict(), "id": doc.id}
-        for doc in docs
-    ]
-    return jsonify(articles=articles), 200
+    data = request.get_json(force=True)
 
+    lexileTarget = data.get("lexileTarget")
+    targetWords = data.get("targetWords")
+
+    # 驗證欄位
+    if not isinstance(lexileTarget, int):
+        return jsonify(error="Invalid lexileTarget"), 400
+
+    # 若未給 targetWords，則從使用者字典中自動挑選
+    if not targetWords:
+        docs = db.collection("words")\
+                .where("userId", "==", user_id)\
+                .order_by("dueDate")\
+                .limit(5).stream()
+        targetWords = [doc.id for doc in docs]
+
+    if not targetWords:
+        return jsonify(error="無法自動選取單字，請手動輸入至少一個單字"), 400
+
+
+    # 組 prompt
+    prompt = (
+        f"Write a short, engaging English story around Lexile level {lexileTarget}. "
+        f"Make sure to include these words: {', '.join(targetWords)}. "
+        f"Keep it readable for learners, about 150-300 words long."
+    )
+
+    try:
+        resp = openai.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=400
+        )
+        article_text = resp.choices[0].message.content.strip()
+    except Exception as e:
+        return jsonify(error="GPT generation failed", detail=str(e)), 500
+
+    # 計算 Lexile
+    lexileActual = lexile_score(article_text)
+
+    # 統計 targetWords 出現次數
+    counts = {w.lower(): article_text.lower().count(w.lower()) for w in targetWords}
+
+    doc_ref = db.collection("articles").document()
+    doc_ref.set({
+        "userId": user_id,
+        "createdAt": datetime.utcnow(),
+        "lexileTarget": lexileTarget,
+        "lexileActual": lexileActual,
+        "targetWords": targetWords,
+        "wordCounts": counts,
+        "article": article_text
+    })
+
+    return jsonify({
+        "id": doc_ref.id,
+        "article": article_text,
+        "lexileTarget": lexileTarget,
+        "lexileActual": lexileActual,
+        "wordCounts": counts
+    }), 201
+    
 @bp.route('/<article_id>', methods=['GET'])
 @auth_required
 def get_article(article_id):
@@ -129,3 +140,41 @@ def delete_article(article_id):
 
     doc_ref.delete()
     return '', 204
+@bp.route('', methods=['GET'])
+@auth_required
+def list_articles():
+    """
+    列出所有使用者自己的文章，包含目標與實際難度
+    """
+    user_id = g.user['sub']
+    docs = (db.collection("articles")
+              .where("userId", "==", user_id)
+              .order_by("createdAt", direction=firestore.Query.DESCENDING)
+              .stream())
+    articles = [
+        {**doc.to_dict(), "id": doc.id}
+        for doc in docs
+    ]
+    return jsonify(articles=articles), 200
+
+@bp.route('/<article_id>/mark_unknown', methods=['POST'])
+@auth_required
+def mark_unknown_word(article_id):
+    user_id = g.user['sub']
+    data = request.get_json(force=True)
+    word = data.get("word", "").strip().lower()
+
+    if not word:
+        return jsonify(error="Missing word"), 400
+
+    doc_ref = db.collection("words").document(f"{user_id}_{word}")
+    doc_ref.set({
+        "userId": user_id,
+        "word": word,
+        "lastInterval": 0,
+        "easeFactor": 2.5,
+        "dueDate": due_date_from_interval(0),
+        "createdAt": datetime.utcnow()
+    })
+
+    return jsonify(message="Word marked as unknown and saved"), 200
